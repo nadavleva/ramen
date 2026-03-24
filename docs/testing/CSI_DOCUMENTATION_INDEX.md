@@ -81,6 +81,11 @@ This page indexes all documentation created for the CSI provisioner fixes.
 
 ---
 
+### [volumegroup-vgr-environment-spec.md](./volumegroup-vgr-environment-spec.md)
+**For:** VolumeGroup vs VolumeGroupReplication setup, CRD sources (`hack/test/` vs kubernetes-csi-addons), required CRDs, Service and CSIAddonsNode fixes
+
+---
+
 ### [csi-replication-methods-and-status.md](./csi-replication-methods-and-status.md)
 **For:** Understanding CSI replication methods and their status
 - Flow of each method (single VR, VolumeGroup+VR, VolumeGroupReplication)
@@ -90,12 +95,8 @@ This page indexes all documentation created for the CSI provisioner fixes.
 
 ---
 
-### [VGR-NO-LEADER-FIX-GUIDE.md](./VGR-NO-LEADER-FIX-GUIDE.md)
-**For:** Fixing VolumeGroupReplication "no leader for the ControllerService" errors
-- Root cause (CSIAddonsNode for controller vs daemonset)
-- Problem vs fixed state, diagnostic commands
-- Immediate fix (restart, project scripts)
-- Permanent configuration options (CephCluster patch, monitoring CronJob)
+### VGR "no leader for the ControllerService"
+**For:** Fixing VolumeGroupReplication controller/leader issues — see [volumegroup-vgr-environment-spec.md §4](./volumegroup-vgr-environment-spec.md#42-csiaddonsnode-and-csi-controllerservice-no-leader-class-of-failures), run `make restart-csi-service`, and ensure `fix-csi-addons-tls` sidecar leader-election args are applied.
 
 ---
 
@@ -123,7 +124,7 @@ This page indexes all documentation created for the CSI provisioner fixes.
 → [csi-replication-methods-and-status.md](./csi-replication-methods-and-status.md)
 
 ### "VGR fails with 'no leader for the ControllerService'"
-→ [VGR-NO-LEADER-FIX-GUIDE.md](./VGR-NO-LEADER-FIX-GUIDE.md)
+→ [volumegroup-vgr-environment-spec.md §4](./volumegroup-vgr-environment-spec.md#42-csiaddonsnode-and-csi-controllerservice-no-leader-class-of-failures) and `make restart-csi-service`
 
 ---
 
@@ -212,7 +213,7 @@ make test-csi-failover
 → See "CSI Component Architecture" in [CSI_PROVISIONER_FIXES.md](./CSI_PROVISIONER_FIXES.md)
 
 **"VolumeGroupReplication stuck with 'no leader' error"**
-→ [VGR-NO-LEADER-FIX-GUIDE.md](./VGR-NO-LEADER-FIX-GUIDE.md)
+→ [volumegroup-vgr-environment-spec.md](./volumegroup-vgr-environment-spec.md) · `make restart-csi-service`
 
 ---
 
@@ -222,7 +223,7 @@ make test-csi-failover
 docs/testing/
 ├── CSI_FIXES_QUICK_REFERENCE.md         ← Start here
 ├── CSI_PROVISIONER_FIXES.md             ← Deep dive
-├── VGR-NO-LEADER-FIX-GUIDE.md           ← VGR "no leader" fix
+├── volumegroup-vgr-environment-spec.md  ← VGR setup + "no leader" / Service / CSIAddonsNode
 ├── CSI_IMPLEMENTATION_SUMMARY.md        ← Overview
 ├── CSI_CHANGES_EXPLAINED.md             ← Change details
 ├── CSI_DOCUMENTATION_INDEX.md           ← This file
