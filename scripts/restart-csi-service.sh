@@ -182,9 +182,27 @@ verify_fix() {
     local rbd_controller_nodes
     rbd_controller_nodes=$(kubectl --context=$context get csiaddonsnode -A -o name 2>/dev/null | grep -c "csi-rbdplugin-provisioner" || echo "0")
     if [ "${rbd_controller_nodes:-0}" -eq 0 ]; then
-        echo -e "${YELLOW}⚠️  No CSIAddonsNode for RBD controller (deployment) - VGR/VR may fail with 'no leader'${NC}"
-        echo "    CSIAddonsNode resources:"
-        kubectl --context=$context get csiaddonsnode -A 2>/dev/null | head -10 || echo "  (none found)"
+        echo -e "${YELLOW}⚠️  No CSIAddonsNode for RBD controller (deployment) — creating one...${NC}"
+        local prov_pod
+        prov_pod=$(kubectl --context=$context -n rook-ceph get pods -l app=csi-rbdplugin-provisioner \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        if [ -n "$prov_pod" ]; then
+            kubectl --context=$context apply -f - <<EOF
+apiVersion: csiaddons.openshift.io/v1alpha1
+kind: CSIAddonsNode
+metadata:
+  name: ${context}-rook-ceph-provisioner-csi-rbdplugin
+  namespace: rook-ceph
+spec:
+  driver:
+    name: rook-ceph.rbd.csi.ceph.com
+    endpoint: "pod://${prov_pod}.rook-ceph:9070"
+    nodeID: ${context}
+EOF
+            echo -e "${GREEN}✓ CSIAddonsNode created for provisioner pod ${prov_pod}${NC}"
+        else
+            echo -e "${RED}❌ No RBD provisioner pod found — cannot create CSIAddonsNode${NC}"
+        fi
     else
         echo -e "${GREEN}✓ RBD controller CSIAddonsNode present${NC}"
     fi
