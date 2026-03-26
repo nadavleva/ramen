@@ -42,6 +42,7 @@ capture_diagnostic_logs() {
 fail() {
   local msg="$1"
   local step="${2:-unknown}"
+  TEST_FAILED=1
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   log_error "VGR TEST FAILURE [step: $step]"
@@ -62,7 +63,6 @@ fail() {
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   capture_diagnostic_logs
-  exit 1
 }
 
 NAMESPACE="vgr-test-$(date +%s)"
@@ -74,6 +74,7 @@ PVC_NAME_PREFIX="vgr-pvc"
 NUM_PVCS=3
 YAML_DIR="$REPO_ROOT/test/yaml/vgr"
 REPLICATION_WAIT_SEC=150
+TEST_FAILED=0
 
 declare -a WRITTEN_DATA
 
@@ -211,10 +212,11 @@ validate_3_creation() {
     fi
     
     # Check for ceph-csi#6190: group handle mishandled as volume id
-    if [[ "$message" =~ "volume not found" ]] && [[ "$message" =~ "EnableVolumeReplication" ]]; then
+    # Error pattern: "volume 0001-0009-... not found: Failed as image not found"
+    if [[ "$message" =~ "volume".*"not found" ]] && [[ "$message" =~ "image not found" ]]; then
       echo ""
       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      log_warn "SKIPPING: VolumeGroupReplication test blocked by known issue"
+      log_warning "SKIPPING: VolumeGroupReplication test blocked by known issue"
       echo ""
       echo "  Issue: ceph-csi#6190 (https://github.com/ceph/ceph-csi/issues/6190)"
       echo "  Description: ceph-csi treats group handle as volume id, causing 'volume not found'"
@@ -223,8 +225,8 @@ validate_3_creation() {
       echo "  Fix: Requires ceph-csi driver fix to properly handle ReplicationSource_VolumeGroup"
       echo "  See: docs/testing/csi-replication-methods-and-status.md §Known issues"
       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      cleanup
-      exit 0  # Exit with success since this is a known issue, not a test infrastructure problem
+      TEST_FAILED=1
+      return 1  # Return error to skip remaining validations but continue to cleanup
     fi
     
     log_info "Waiting for VolumeGroupReplication to reach Primary (${elapsed}s/300s) - current: ${state:-<none>}"
@@ -232,6 +234,7 @@ validate_3_creation() {
     elapsed=$((elapsed + 10))
   done
   fail "Validation 3: VolumeGroupReplication '$VGR_NAME' did not reach Primary within 300s. Current state: '${state:-<none>}'. VGR controller may not be reconciling (CSI Addons v0.13+ required)." "vgr_primary"
+  return 1
 }
 
 # Validation 4: Resources created (VGRC, VRs)
@@ -389,17 +392,21 @@ echo "=== CSI VolumeGroupReplication (VGR) Validation ==="
 echo "Flow: VolumeGroupReplication with source.selector; controller creates VGRC and per-volume VRs"
 echo ""
 
-validate_1_crds
-validate_2_classes
-validate_3_creation
-validate_4_resources
-validate_5_replication_active
-validate_6_data_write
-validate_7_cross_cluster
-validate_8_failover
-validate_9_data_consistency
-validate_10_cleanup
+validate_1_crds || { TEST_FAILED=1; }
+validate_2_classes || { TEST_FAILED=1; }
+validate_3_creation || { TEST_FAILED=1; }
+[[ $TEST_FAILED -eq 0 ]] && validate_4_resources || { TEST_FAILED=1; }
+[[ $TEST_FAILED -eq 0 ]] && validate_5_replication_active || { TEST_FAILED=1; }
+[[ $TEST_FAILED -eq 0 ]] && validate_6_data_write || { TEST_FAILED=1; }
+[[ $TEST_FAILED -eq 0 ]] && validate_7_cross_cluster || { TEST_FAILED=1; }
+[[ $TEST_FAILED -eq 0 ]] && validate_8_failover || { TEST_FAILED=1; }
+[[ $TEST_FAILED -eq 0 ]] && validate_9_data_consistency || { TEST_FAILED=1; }
+[[ $TEST_FAILED -eq 0 ]] && validate_10_cleanup || { TEST_FAILED=1; }
 
 echo ""
-log_success "All 10 validations passed!"
+if [[ $TEST_FAILED -eq 0 ]]; then
+  log_success "All 10 validations passed!"
+else
+  log_error "Test failed - see diagnostics above"
+fi
 echo ""
