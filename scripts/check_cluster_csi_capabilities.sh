@@ -22,6 +22,13 @@ need_cmd sed
 # Optional: set to reduce pod output (regex-like string used by jq test(...;"i"))
 POD_HINT="${POD_HINT:-}"
 
+# CSI-Addons capability patterns (used in jq with ascii_downcase, so patterns are lowercase)
+CAP_REPLICATION="replication"
+CAP_NETWORK_FENCE="network_fence"
+CAP_GET_CLIENTS_TO_FENCE="get_clients_to_fence"
+CAP_VOLUME_GROUP="volume_group\\.volume_group"
+CAP_VOLUME_REPLICATION="volume_replication\\.volume_replication"
+
 # Parse arguments
 CHECK_MODE="${CHECK_MODE:-networkfence}"
 while [[ $# -gt 0 ]]; do
@@ -138,8 +145,11 @@ print_csiaddonsnode_vgr_table() {
 'NAMESPACE:.metadata.namespace,NAME:.metadata.name,DRIVER:.spec.driver.name,STATE:.status.state,ENDPOINT:.spec.driver.endpoint' \
     2>/dev/null | sed 's/^/  /'
   echo
-  echo "  Per-node capabilities (replication / volume_group_replication):"
-  kubectl get "${csiaddonsnode_crd}" -A -o json 2>/dev/null | jq -r '
+  echo "  Per-node capabilities (replication / volume_group + volume_replication):"
+  kubectl get "${csiaddonsnode_crd}" -A -o json 2>/dev/null | jq -r \
+    --arg cap_repl "$CAP_REPLICATION" \
+    --arg cap_vg "$CAP_VOLUME_GROUP" \
+    --arg cap_vgr "$CAP_VOLUME_REPLICATION" '
     .items[]
     | . as $n
     | ($n.status.capabilities // []) as $caps
@@ -148,8 +158,8 @@ print_csiaddonsnode_vgr_table() {
         ($n.metadata.namespace // "-"),
         ($n.metadata.name // "-"),
         ($n.spec.driver.name // "-"),
-        (($lc | any(test("replication"))) | tostring),
-        (($lc | any(test("volume_group_replication"))) | tostring)
+        (($lc | any(test($cap_repl))) | tostring),
+        ((($lc | any(test($cap_vg))) and ($lc | any(test($cap_vgr)))) | tostring)
       ]
     | @tsv
   ' | awk -F'\t' 'BEGIN{printf "  %-20s %-40s %-35s %-12s %s\n","NAMESPACE","NAME","DRIVER","REPLICATION","VGR_CAP"; print "  " "------------------------------------------------------------------------------------------"}
@@ -210,8 +220,10 @@ print_vgr_configuration_verdict() {
   repl_nodes="$(kubectl get "${csiaddonsnode_crd}" -A -o json 2>/dev/null | jq '
     [.items[] | select((.status.capabilities // []) | map(ascii_downcase) | any(test("replication")))] | length
   ')"
-  vgr_nodes="$(kubectl get "${csiaddonsnode_crd}" -A -o json 2>/dev/null | jq '
-    [.items[] | select((.status.capabilities // []) | map(ascii_downcase) | any(test("volume_group_replication")))] | length
+  vgr_nodes="$(kubectl get "${csiaddonsnode_crd}" -A -o json 2>/dev/null | jq \
+    --arg cap_vg "$CAP_VOLUME_GROUP" \
+    --arg cap_vgr "$CAP_VOLUME_REPLICATION" '
+    [.items[] | select(((.status.capabilities // []) | map(ascii_downcase) | any(test($cap_vg))) and ((.status.capabilities // []) | map(ascii_downcase) | any(test($cap_vgr))))] | length
   ')"
   pod_lines="$(list_rbd_pods_with_csi_addons_sidecar | wc -l)"
 
@@ -236,9 +248,9 @@ print_vgr_configuration_verdict() {
     echo "  FAIL: No CSIAddonsNode advertises replication (VGR depends on replication RPCs)."
   fi
   if [[ "${vgr_nodes}" -gt 0 ]]; then
-    echo "  OK: ${vgr_nodes} node(s) advertise volume_group_replication capability."
+    echo "  OK: ${vgr_nodes} node(s) advertise both volume_group.VOLUME_GROUP and volume_replication.VOLUME_REPLICATION."
   else
-    echo "  FAIL: No CSIAddonsNode advertises volume_group_replication (driver too old or feature off)."
+    echo "  FAIL: No CSIAddonsNode advertises both required capabilities (volume_group + volume_replication)."
   fi
 }
 
@@ -405,7 +417,7 @@ check_csi_replication() {
     echo "SKIP: CSIAddonsNode CRD not installed."
     EXIT_CODE=1
   else
-    has_replication="$(detect_capability_in_csiaddonsnode "replication" "$csiaddonsnode_crd")"
+    has_replication="$(detect_capability_in_csiaddonsnode "$CAP_REPLICATION" "$csiaddonsnode_crd")"
     
     if [[ "${has_replication}" != "[]" && -n "${has_replication}" ]]; then
       drivers_repl="$(echo "$has_replication" | jq -r '.[] | .driver' | sort -u | tr '\n' ', ' | sed 's/,$//')"
@@ -443,7 +455,7 @@ check_volumegroupreplication() {
     echo "SKIP: CSIAddonsNode CRD not installed."
     EXIT_CODE=1
   else
-    has_replication="$(detect_capability_in_csiaddonsnode "replication" "$csiaddonsnode_crd")"
+    has_replication="$(detect_capability_in_csiaddonsnode "$CAP_REPLICATION" "$csiaddonsnode_crd")"
     
     if [[ "${has_replication}" != "[]" && -n "${has_replication}" ]]; then
       drivers_repl="$(echo "$has_replication" | jq -r '.[] | .driver' | sort -u | tr '\n' ', ' | sed 's/,$//')"
@@ -456,20 +468,36 @@ check_volumegroupreplication() {
   fi
 
   echo
-  echo "## Per-driver VOLUME_GROUP_REPLICATION capability"
+  echo "## Per-driver VOLUME_GROUP and VOLUME_REPLICATION capabilities"
   if [[ -z "${csiaddonsnode_crd}" || "${csiaddonsnode_crd}" == "null" ]]; then
     echo "SKIP: CSIAddonsNode CRD is not installed."
   else
-    has_vgr_capability="$(detect_capability_in_csiaddonsnode "volume_group_replication" "$csiaddonsnode_crd")"
+    has_volume_group="$(detect_capability_in_csiaddonsnode "$CAP_VOLUME_GROUP" "$csiaddonsnode_crd")"
+    has_volume_replication_for_vgr="$(detect_capability_in_csiaddonsnode "$CAP_VOLUME_REPLICATION" "$csiaddonsnode_crd")"
 
-    if [[ "${has_vgr_capability}" == "[]" || -z "${has_vgr_capability}" ]]; then
-      echo "RESULT: No driver advertises VOLUME_GROUP_REPLICATION capability."
-      echo "        Group replication support requires explicit VOLUME_GROUP_REPLICATION capability."
-      EXIT_CODE=1
+    vg_found=false
+    repl_found=false
+    
+    if [[ "${has_volume_group}" != "[]" && -n "${has_volume_group}" ]]; then
+      vg_found=true
+      drivers_vg="$(echo "$has_volume_group" | jq -r '.[] | .driver' | sort -u | tr '\n' ', ' | sed 's/,$//')"
+      echo "OK: Driver(s) advertise volume_group.VOLUME_GROUP: $drivers_vg"
     else
-      drivers_vgr="$(echo "$has_vgr_capability" | jq -r '.[] | .driver' | sort -u | tr '\n' ', ' | sed 's/,$//')"
-      echo "OK: Driver(s) advertise VOLUME_GROUP_REPLICATION capability: $drivers_vgr"
-      echo "$has_vgr_capability" | jq -r '.[] | "  - \(.driver): \(.capability)"' | sort -u
+      echo "RESULT: No driver advertises volume_group.VOLUME_GROUP capability."
+      echo "        VGR requires both replication and volume group support."
+    fi
+    
+    if [[ "${has_volume_replication_for_vgr}" != "[]" && -n "${has_volume_replication_for_vgr}" ]]; then
+      repl_found=true
+      drivers_repl_vgr="$(echo "$has_volume_replication_for_vgr" | jq -r '.[] | .driver' | sort -u | tr '\n' ', ' | sed 's/,$//')"
+      echo "OK: Driver(s) advertise volume_replication.VOLUME_REPLICATION: $drivers_repl_vgr"
+    else
+      echo "RESULT: No driver advertises volume_replication.VOLUME_REPLICATION capability."
+      echo "        VGR requires both replication and volume group support."
+    fi
+    
+    if [[ "${vg_found}" == "false" || "${repl_found}" == "false" ]]; then
+      EXIT_CODE=1
     fi
   fi
 
@@ -483,10 +511,12 @@ check_volumegroupreplication() {
   echo
   echo "== VolumeGroupReplication notes =="
   echo "- VGR CRDs come from kubernetes-csi-addons. Rook (v1.10+) no longer ships them."
-  echo "- Ceph CSI driver supports replication; install CRDs if missing."
-  echo "- VOLUME_GROUP_REPLICATION capability indicates support for group replication operations."
+  echo "- VGR requires BOTH CSI Replication Addon spec capabilities:"
+  echo "  * volume_replication.VOLUME_REPLICATION (CSI Replication Addon)"
+  echo "  * volume_group.VOLUME_GROUP (CSI VolumeGroup spec)"
   echo "- kubernetes-csi-addons v0.13+ is recommended for VGR reconciliation; match sidecar/controller versions per upstream docs."
-  echo "- volume_replication.* on the RBD provisioner CSIAddonsNode is expected; volume_group_replication.* must appear there for VGR."
+  echo "- The CSI-addons Identity spec combines replication + volume group capabilities; no separate VOLUME_GROUP_REPLICATION capability exists."
+  echo "- Check for volume_replication.* and volume_group.* capabilities on the RBD provisioner CSIAddonsNode."
 }
 
 # Main
