@@ -54,7 +54,7 @@ cleanup() {
   log_info "Cleaning up..."
   set +e
   for ctx in dr1 dr2; do
-    kubectl --context=$ctx delete volumereplication "$VR_NAME" -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null
+    csi_cleanup_volumereplication "$ctx" "$NAMESPACE" "$VR_NAME"
     kubectl --context=$ctx delete volumegroup "$VG_NAME" -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null
     for i in $(seq 1 $NUM_PVCS); do
       kubectl --context=$ctx delete pod "vgr-writer-$i" -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null
@@ -79,7 +79,8 @@ set +e
 for ctx in dr1 dr2; do
   for ns in $(kubectl --context=$ctx get namespaces -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep '^vgr-test-' || true); do
     [[ -z "$ns" ]] && continue
-    kubectl --context=$ctx delete volumereplication --all -n "$ns" --ignore-not-found=true --wait=false 2>/dev/null
+    # Clean VolumeReplications with finalizer removal
+    csi_cleanup_volumereplications_in_namespace "$ctx" "$ns"
     kubectl --context=$ctx delete volumegroup --all -n "$ns" --ignore-not-found=true --wait=false 2>/dev/null
     for i in $(seq 1 $NUM_PVCS); do
       csi_cleanup_pvc "$ctx" "$ns" "${PVC_NAME_PREFIX}-$i"

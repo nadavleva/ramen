@@ -83,6 +83,8 @@ cleanup() {
   for ctx in dr1 dr2; do
     csi_cleanup_volumegroupreplication "$ctx" "$NAMESPACE" "$VGR_NAME"
     csi_cleanup_volumegroupreplicationcontents "$ctx"
+    # Clean up all VolumeReplications created by VGR (they have generated names)
+    csi_cleanup_volumereplications_in_namespace "$ctx" "$NAMESPACE"
     for i in $(seq 1 $NUM_PVCS); do
       kubectl --context=$ctx delete pod "vgr-writer-$i" -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null
       kubectl --context=$ctx delete pod "vgr-reader-$i" -n "$NAMESPACE" --ignore-not-found=true --wait=false 2>/dev/null
@@ -129,6 +131,7 @@ for ctx in dr1 dr2; do
     [[ -z "$ns" ]] && continue
     csi_cleanup_volumegroupreplication "$ctx" "$ns" "vgr-test"
     csi_cleanup_volumegroupreplicationcontents "$ctx"
+    csi_cleanup_volumereplications_in_namespace "$ctx" "$ns"
     for i in $(seq 1 $NUM_PVCS); do
       csi_cleanup_pvc "$ctx" "$ns" "${PVC_NAME_PREFIX}-$i"
     done

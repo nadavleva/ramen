@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: The RamenDR authors
 # SPDX-License-Identifier: Apache-2.0
 
-# Clean all VolumeReplications and PVCs from CSI replication clusters for fresh testing.
+# Clean all VolumeReplications, VolumeGroupReplications, VolumeGroupReplicationContents, and PVCs
+# from CSI replication clusters for fresh testing.
 # Removes finalizers before deletion to avoid resources stuck in Terminating state.
 
 set -e
@@ -31,13 +32,13 @@ done
 CONTEXTS="${CONTEXTS:-dr1 dr2}"
 CONTEXTS=$(echo "$CONTEXTS" | xargs)
 
-log_info "Cleaning all VolumeReplications and PVCs for fresh testing"
+log_info "Cleaning all VolumeReplications, VolumeGroupReplications, VolumeGroupReplicationContents, and PVCs for fresh testing"
 log_info "Target contexts: $CONTEXTS"
 echo ""
 
 # Confirmation unless --force (skip prompt when stdin is not a TTY)
 if [ "$FORCE" != "true" ] && [ -t 0 ]; then
-    log_warning "This will delete ALL VolumeReplications and PVCs in ALL namespaces on: $CONTEXTS"
+    log_warning "This will delete ALL VolumeReplications, VolumeGroupReplications, VolumeGroupReplicationContents, and PVCs in ALL namespaces on: $CONTEXTS"
     read -p "Continue? [y/N] " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -73,7 +74,43 @@ for context in $CONTEXTS; do
     kubectl --context="$context" delete volumereplication -A --all --ignore-not-found --wait=false 2>/dev/null || true
     log_info "  Deleted VolumeReplications"
 
-    # 3. Remove finalizers from PVCs first
+    # 3. Remove finalizers from VolumeGroupReplications first
+    vgr_count=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        ns="${line%%/*}"
+        name="${line##*/}"
+        kubectl --context="$context" -n "$ns" patch volumegroupreplication "$name" --type=merge -p='{"metadata":{"finalizers":[]}}' 2>/dev/null || true
+        vgr_count=$((vgr_count + 1))
+    done < <(kubectl --context="$context" get volumegroupreplication -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+
+    if [ "$vgr_count" -gt 0 ]; then
+        log_info "  Removed finalizers from $vgr_count VolumeGroupReplication(s)"
+    fi
+
+    # 4. Delete all VolumeGroupReplications
+    kubectl --context="$context" delete volumegroupreplication -A --all --ignore-not-found --wait=false 2>/dev/null || true
+    log_info "  Deleted VolumeGroupReplications"
+
+    # 5. Remove finalizers from VolumeGroupReplicationContents first
+    vgrc_count=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        ns="${line%%/*}"
+        name="${line##*/}"
+        kubectl --context="$context" -n "$ns" patch volumegroupreplicationcontent "$name" --type=merge -p='{"metadata":{"finalizers":[]}}' 2>/dev/null || true
+        vgrc_count=$((vgrc_count + 1))
+    done < <(kubectl --context="$context" get volumegroupreplicationcontent -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+
+    if [ "$vgrc_count" -gt 0 ]; then
+        log_info "  Removed finalizers from $vgrc_count VolumeGroupReplicationContent(s)"
+    fi
+
+    # 6. Delete all VolumeGroupReplicationContents
+    kubectl --context="$context" delete volumegroupreplicationcontent -A --all --ignore-not-found --wait=false 2>/dev/null || true
+    log_info "  Deleted VolumeGroupReplicationContents"
+
+    # 7. Remove finalizers from PVCs first
     pvc_count=0
     while IFS= read -r line; do
         [ -z "$line" ] && continue
@@ -87,7 +124,7 @@ for context in $CONTEXTS; do
         log_info "  Removed finalizers from $pvc_count PVC(s)"
     fi
 
-    # 4. Delete all PVCs
+    # 8. Delete all PVCs
     kubectl --context="$context" delete pvc -A --all --ignore-not-found --wait=false 2>/dev/null || true
     log_info "  Deleted PVCs"
 
@@ -95,4 +132,4 @@ for context in $CONTEXTS; do
 done
 
 echo ""
-log_success "PVC and VolumeReplication cleanup complete. Ready for fresh testing."
+log_success "VolumeReplication, VolumeGroupReplication, VolumeGroupReplicationContent, and PVC cleanup complete. Ready for fresh testing."
