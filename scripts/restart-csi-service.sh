@@ -187,18 +187,9 @@ verify_fix() {
         prov_pod=$(kubectl --context=$context -n rook-ceph get pods -l app=csi-rbdplugin-provisioner \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
         if [ -n "$prov_pod" ]; then
-            kubectl --context=$context apply -f - <<EOF
-apiVersion: csiaddons.openshift.io/v1alpha1
-kind: CSIAddonsNode
-metadata:
-  name: ${context}-rook-ceph-provisioner-csi-rbdplugin
-  namespace: rook-ceph
-spec:
-  driver:
-    name: rook-ceph.rbd.csi.ceph.com
-    endpoint: "pod://${prov_pod}.rook-ceph:9070"
-    nodeID: ${context}
-EOF
+            # Use template file from test/yaml/objects for consistency across scripts
+            CONTEXT=$context PROVISIONER_POD=$prov_pod envsubst < "$(dirname "$0")/../test/yaml/objects/csiaddonsnode-provisioner-rbd.yaml" | \
+                kubectl --context=$context apply -f -
             echo -e "${GREEN}✓ CSIAddonsNode created for provisioner pod ${prov_pod}${NC}"
         else
             echo -e "${RED}❌ No RBD provisioner pod found — cannot create CSIAddonsNode${NC}"

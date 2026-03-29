@@ -1,0 +1,10 @@
+apiVersion: csiaddons.openshift.io/v1alpha1
+kind: CSIAddonsNode
+metadata:
+  name: ${CONTEXT}-rook-ceph-provisioner-rbd
+  namespace: rook-ceph
+spec:
+  driver:
+    name: rook-ceph.rbd.csi.ceph.com
+    endpoint: "pod://${PROVISIONER_POD}.rook-ceph:9070"
+    nodeID: ${CONTEXT}
