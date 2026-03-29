@@ -43,12 +43,19 @@ for context in dr1 dr2; do
     # --- CSI Sidecar TLS (csi-addons containers only) ---
     # Include leader-election args so we don't overwrite/strip them (required for VGR "no leader" fix)
     # Staging path matches Rook default; leader-election uses shorter durations for faster recovery
+    # IMPORTANT: csi-addons (kubernetes-csi-addons sidecar) auto-detects controller capability from driver
+    # Do NOT include -controllerserver flag here - that flag doesn't exist for csi-addons-sidecar
     CSI_ADDONS_PATCH='{"spec":{"template":{"spec":{"containers":[{"name":"csi-addons","args":["--node-id=$(NODE_ID)","--csi-addons-address=$(CSIADDONS_ENDPOINT)","--controller-port=9070","--pod=$(POD_NAME)","--namespace=$(POD_NAMESPACE)","--pod-uid=$(POD_UID)","--stagingpath=/var/lib/kubelet/plugins/kubernetes.io/csi/","--leader-election-namespace=$(POD_NAMESPACE)","--leader-election-lease-duration=15s","--leader-election-renew-deadline=10s","--leader-election-retry-period=2s"]}]}}}}'
     echo "  Fixing CSI sidecar TLS (preserving leader-election args)..."
 
     # csi-rbdplugin-provisioner: csi-addons, csi-rbdplugin, log-collector (by name)
     if kubectl --context=$context get deployment csi-rbdplugin-provisioner -n rook-ceph &>/dev/null; then
-        # Restore csi-rbdplugin if wrongly patched (alpine image or sleep args)
+        # CRITICAL: Ensure csi-rbdplugin runs with -controllerserver=true for NetworkFence capability
+        # This is required for the sidecar to advertise CONTROLLER_SERVICE and NetworkFence capabilities
+        patch_container_by_name "$context" deployment csi-rbdplugin-provisioner rook-ceph csi-rbdplugin \
+            '{"spec":{"template":{"spec":{"containers":[{"name":"csi-rbdplugin","args":["--nodeid=$(NODE_ID)","--type=rbd","--controllerserver=true","--endpoint=unix:///csi/csi-provisioner.sock","--csi-addons-endpoint=$(CSIADDONS_ENDPOINT)","--v=0","--drivername=rook-ceph.rbd.csi.ceph.com","--pidlimit=-1"]}]}}}}'
+        
+        # Also restore if it was wrongly patched (alpine image or sleep args)
         rbdplugin_img=$(kubectl --context=$context get deployment csi-rbdplugin-provisioner -n rook-ceph -o json 2>/dev/null | \
             jq -r '.spec.template.spec.containers[] | select(.name=="csi-rbdplugin") | .image' 2>/dev/null || true)
         rbdplugin_args=$(kubectl --context=$context get deployment csi-rbdplugin-provisioner -n rook-ceph -o json 2>/dev/null | \
@@ -61,8 +68,12 @@ for context in dr1 dr2; do
         patch_container_by_name "$context" deployment csi-rbdplugin-provisioner rook-ceph csi-addons "$CSI_ADDONS_PATCH"
     fi
 
-    # csi-cephfsplugin-provisioner: csi-addons, csi-provisioner (by name)
+    # csi-cephfsplugin-provisioner: csi-addons, csi-cephfsplugin, csi-provisioner (by name)
     if kubectl --context=$context get deployment csi-cephfsplugin-provisioner -n rook-ceph &>/dev/null; then
+        # CRITICAL: Ensure csi-cephfsplugin runs with -controllerserver=true for NetworkFence capability
+        patch_container_by_name "$context" deployment csi-cephfsplugin-provisioner rook-ceph csi-cephfsplugin \
+            '{"spec":{"template":{"spec":{"containers":[{"name":"csi-cephfsplugin","args":["--nodeid=$(NODE_ID)","--type=cephfs","--controllerserver=true","--endpoint=unix:///csi/csi-provisioner.sock","--v=0","--drivername=rook-ceph.cephfs.csi.ceph.com","--pidlimit=-1","--csi-addons-endpoint=$(CSIADDONS_ENDPOINT)"]}]}}}}'
+        
         prov_args=$(kubectl --context=$context get deployment csi-cephfsplugin-provisioner -n rook-ceph -o json 2>/dev/null | \
             jq -r '.spec.template.spec.containers[] | select(.name=="csi-provisioner") | .args | join(" ")' 2>/dev/null || true)
         if echo "$prov_args" | grep -q "listen-port"; then
@@ -93,6 +104,15 @@ for context in dr1 dr2; do
 
     echo ""
 done
+
+# --- Clean up old CSIAddonsNode resources to force fresh capability probe ---
+echo "Cleaning up old CSIAddonsNode resources to force fresh capability detection..."
+for context in dr1 dr2; do
+    if kubectl --context=$context get csiaddonsnode -A >/dev/null 2>&1; then
+        kubectl --context=$context delete csiaddonsnode --all -A --ignore-not-found=true 2>/dev/null || true
+    fi
+done
+sleep 5
 
 # --- Wait for controller rollouts ---
 echo "Waiting for CSI Addons controllers to restart..."
