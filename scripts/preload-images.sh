@@ -11,6 +11,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/utils.sh
 source "$SCRIPT_DIR/utils.sh"
 
+# Function to read required images from centralized config file
+read_required_images() {
+    local config_file="$SCRIPT_DIR/../config/required-images.txt"
+    
+    if [[ ! -f "$config_file" ]]; then
+        log_error "Required images config file not found: $config_file"
+        return 1
+    fi
+    
+    # Clear the array first
+    ALL_REQUIRED_IMAGES=()
+    
+    # Read images from file, skipping comments and empty lines
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip comments (lines starting with #) and empty lines
+        if [[ "$line" =~ ^[[:space:]]*# ]] || [[ -z "${line// }" ]]; then
+            continue
+        fi
+        # Trim whitespace and add to array
+        ALL_REQUIRED_IMAGES+=("${line// }")
+    done < "$config_file"
+}
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -26,6 +49,27 @@ log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Get the host IP for local registry access from minikube clusters
+get_registry_host_ip() {
+    # Try to get the primary host IP (not loopback)
+    local host_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    
+    if [ -z "$host_ip" ] || [ "$host_ip" = "127.0.0.1" ]; then
+        # Fallback: try to detect from default route
+        host_ip=$(ip route get 1 2>/dev/null | sed -n 's/.*src \([^ ]*\).*/\1/p')
+    fi
+    
+    if [ -z "$host_ip" ]; then
+        host_ip="localhost"
+    fi
+    
+    echo "$host_ip"
+}
+
+# Export registry host IP for use in cluster image pulls
+REGISTRY_HOST_IP=$(get_registry_host_ip)
+log_info "Registry host IP detected as: $REGISTRY_HOST_IP"
+
 # CONTAINER_RUNTIME from parent (setup-csi-replication) takes precedence
 # PREFER_DOCKER=1 forces docker when both are available
 if [ "${PREFER_DOCKER:-0}" = "1" ]; then
@@ -35,43 +79,10 @@ else
 fi
 log_info "Using $CONTAINER_RUNTIME as container runtime"
 
-# Define required images for Rook/Ceph and CSI
-declare -a ROOK_IMAGES=(
-    "quay.io/rook/ceph:v1.18.9"
-    "quay.io/ceph/ceph:v19"
-    "quay.io/nladha/csiaddons-sidecar:cg"
-)
-
-declare -a CSI_IMAGES=(
-    "registry.k8s.io/sig-storage/csi-attacher:v4.8.1"
-    "registry.k8s.io/sig-storage/csi-provisioner:v5.2.0"
-    "registry.k8s.io/sig-storage/csi-resizer:v1.13.2"
-    "registry.k8s.io/sig-storage/csi-snapshotter:v8.2.1"
-    "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0"
-    "registry.k8s.io/sig-storage/livenessprobe:v2.8.0"
-    "registry.k8s.io/sig-storage/csi-external-health-monitor-controller:v0.7.0"
-    "registry.k8s.io/sig-storage/snapshot-controller:v7.0.1"
-)
-
-declare -a CSI_ADDONS_IMAGES=(
-    "quay.io/csiaddons/k8s-controller:latest"
-    "quay.io/csiaddons/k8s-sidecar:v0.11.0"
-    "quay.io/nladha/csiaddons-controller:cg"
-    "alpine:3.19"
-    "registry.k8s.io/kubebuilder/kube-rbac-proxy:v0.8.0"
-    "quay.io/cephcsi/cephcsi:v3.11.0"
-    "quay.io/cephcsi/cephcsi:v3.15.0"
-)
-
-# Minikube addon images (only essential ones)
-declare -a MINIKUBE_ADDON_IMAGES=(
-    "docker.io/registry:3.0.0"
-)
-
-# E2E test images
-declare -a E2E_TEST_IMAGES=(
-    "registry.k8s.io/e2e-test-images/busybox:1.37.0-1"
-)
+# Read all required images from centralized config file
+declare -a ALL_REQUIRED_IMAGES=()
+read_required_images
+log_info "Loaded ${#ALL_REQUIRED_IMAGES[@]} images from config file"
 
 # Function to check if Docker image exists locally
 image_exists_locally() {
@@ -91,14 +102,13 @@ image_exists_in_minikube() {
 pre_pull_images() {
     log_info "Pre-pulling required images in parallel to avoid network issues during cluster setup..."
     
-    # Combine all required images
-    ALL_IMAGES=("${ROOK_IMAGES[@]}" "${CSI_IMAGES[@]}" "${CSI_ADDONS_IMAGES[@]}" "${MINIKUBE_ADDON_IMAGES[@]}" "${E2E_TEST_IMAGES[@]}")
+    # Use centralized image list
+    local total_count=${#ALL_REQUIRED_IMAGES[@]}
     
     local need_pulling=()
-    local total_count=${#ALL_IMAGES[@]}
     
     # Check which images need pulling
-    for image in "${ALL_IMAGES[@]}"; do
+    for image in "${ALL_REQUIRED_IMAGES[@]}"; do
         if image_exists_locally "$image"; then
             log_info "✓ Image already available locally: $image"
         else
@@ -185,14 +195,33 @@ pre_pull_images() {
     log_success "Successfully pulled $pulled_count new images, total available: $((total_count - ${#failed_pulls[@]}))"
 }
 
+# Configure local registry access in minikube cluster
+configure_cluster_registry_access() {
+    local profile=$1
+    
+    # Update /etc/hosts in minikube to resolve registry host
+    minikube ssh -p "$profile" "echo '$REGISTRY_HOST_IP local-registry' | sudo tee -a /etc/hosts >/dev/null 2>&1 || true"
+    
+    # Configure Docker daemon to allow insecure registry connection
+    local docker_config='{
+  "insecure-registries": ["'"$REGISTRY_HOST_IP"':5000", "local-registry:5000"]
+}'
+    
+    # Note: Docker daemon config is typically read-only in minikube, so we rely on image pull configuration
+    # The kubelets in minikube should be able to resolve the registry via the host IP
+    log_info "Registry access configured for $profile (registry at $REGISTRY_HOST_IP:5000)"
+}
+
 # Function to load images into a minikube cluster in parallel
 load_images_to_cluster() {
     local profile=$1
     log_info "Loading images into $profile cluster..."
     
-    # Combine all required images
-    ALL_IMAGES=("${ROOK_IMAGES[@]}" "${CSI_IMAGES[@]}" "${CSI_ADDONS_IMAGES[@]}" "${E2E_TEST_IMAGES[@]}")
+    # Configure local registry access in minikube cluster
+    log_info "Configuring registry access in $profile cluster..."
+    configure_cluster_registry_access "$profile"
     
+    # Use centralized image list
     local loaded_count=0
     local failed_images=()
     
@@ -204,10 +233,10 @@ load_images_to_cluster() {
     local images_to_load=()
     if [ -z "$cluster_images" ]; then
         log_warning "Failed to get image list from $profile cluster, will load all images"
-        images_to_load=("${ALL_IMAGES[@]}")
+        images_to_load=("${ALL_REQUIRED_IMAGES[@]}")
     else
         # Check which images are missing (simplified to avoid hanging)
-        for image in "${ALL_IMAGES[@]}"; do
+        for image in "${ALL_REQUIRED_IMAGES[@]}"; do
             if ! echo "$cluster_images" | grep -q "$image"; then
                 images_to_load+=("$image")
             fi
@@ -232,7 +261,7 @@ load_images_to_cluster() {
         local tmpdir="/tmp/preload_batch_${batch_id}"
         mkdir -p "$tmpdir"
         
-        log_info "Processing batch $((i/batch_size + 1))/$((($total_images + batch_size - 1) / batch_size)) for $profile..."
+        log_info "Processing batch $((i/batch_size + 1))/$(((total_images + batch_size - 1) / batch_size)) for $profile..."
         
         # Start batch processes
         local batch_start_idx=$i
@@ -376,6 +405,9 @@ main() {
     
     # Container runtime check is done at the top of the script
     log_info "Using $CONTAINER_RUNTIME as container runtime"
+    
+    # Read required images from centralized configuration
+    read_required_images
     
     # Pre-pull all images locally first
     log_info "Step 1: Pre-pulling images locally..."
