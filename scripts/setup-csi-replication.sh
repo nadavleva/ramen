@@ -159,19 +159,11 @@ log_info "Registry mirror configured: $MINIKUBE_REGISTRY_MIRROR"
 cd test && source ../venv && drenv start envs/rook.yaml --skip-addons --skip-tests
 cd - >/dev/null
 
-# Configure insecure registry for both clusters (using host IP)
-log_info "Configuring insecure registry access for both clusters..."
-for profile in dr1 dr2; do
-    log_info "Configuring insecure registry in $profile node..."
-    minikube ssh --profile=$profile -- 'sudo mkdir -p /etc/docker' || true
-    minikube ssh --profile=$profile -- "echo '{\"insecure-registries\":[\"${HOST_IP}:5000\",\"localhost:5000\",\"host.minikube.internal:5000\"]}' | sudo tee /etc/docker/daemon.json" >/dev/null || true
-    minikube ssh --profile=$profile -- 'sudo systemctl restart docker' >/dev/null 2>&1 || true
-done
-
-log_info ""
-log_info "Step 4: Waiting for clusters to be ready..."
-kubectl --context=dr1 wait --for=condition=Ready nodes --all --timeout=120s 2>/dev/null || true
-kubectl --context=dr2 wait --for=condition=Ready nodes --all --timeout=120s 2>/dev/null || true
+# Wait for clusters to be ready before configuring registry access
+log_info "Waiting for clusters to stabilize before image preloading..."
+kubectl --context=dr1 wait --for=condition=Ready nodes --all --timeout=180s 2>/dev/null || log_warning "dr1 nodes not ready yet"
+kubectl --context=dr2 wait --for=condition=Ready nodes --all --timeout=180s 2>/dev/null || log_warning "dr2 nodes not ready yet"
+sleep 10
 
 log_info ""
 log_info "Step 5: Loading critical startup images into clusters..."
