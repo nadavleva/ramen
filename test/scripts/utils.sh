@@ -231,18 +231,14 @@ csi_cleanup_volumegroupreplication() {
     kubectl --context="$context" delete volumegroupreplication "$vgr_name" -n "$namespace" --ignore-not-found=true --wait=false 2>/dev/null || true
 }
 
-# Delete all VolumeGroupReplicationContent resources (cluster-scoped)
-# Patches finalizers before delete to avoid stuck Terminating state.
+# Use centralized cleanup function from cleanup-pvc-vr.sh
+# Kept for backward compatibility - calls the centralized function
 # Usage: csi_cleanup_volumegroupreplicationcontents <context>
 csi_cleanup_volumegroupreplicationcontents() {
     local context=$1
-    local vgrc vgrc_name
-    for vgrc in $(kubectl --context="$context" get volumegroupreplicationcontent -o name 2>/dev/null); do
-        [[ -z "$vgrc" ]] && continue
-        vgrc_name="${vgrc#volumegroupreplicationcontent/}"
-        kubectl --context="$context" patch volumegroupreplicationcontent "$vgrc_name" --type='merge' -p='{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-        kubectl --context="$context" delete "$vgrc" --ignore-not-found=true --wait=false 2>/dev/null || true
-    done
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    source "$script_dir/../../scripts/cleanup-pvc-vr.sh"
+    cleanup_csi_resources "$context" --quiet
 }
 
 # Delete a PVC: patch to remove finalizers, then delete

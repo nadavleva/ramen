@@ -147,14 +147,17 @@ done
 echo "Creating CSIAddonsNode for provisioner pods to enable capability re-detection..."
 for context in dr1 dr2; do
     # Get RBD provisioner pod name for CSIAddonsNode endpoint
-    local prov_pod
     prov_pod=$(kubectl --context=$context -n rook-ceph get pods -l app=csi-rbdplugin-provisioner \
         -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
     if [ -n "$prov_pod" ]; then
         # Use template file from test/yaml/objects for consistency across scripts
-        CONTEXT=$context PROVISIONER_POD=$prov_pod envsubst < "$(dirname "$0")/../test/yaml/objects/csiaddonsnode-provisioner-rbd.yaml" | \
-            kubectl --context=$context apply -f -
-        echo "  ✓ CSIAddonsNode created for RBD provisioner pod ${prov_pod}"
+        if CONTEXT=$context PROVISIONER_POD=$prov_pod envsubst < "$(dirname "$0")/../test/yaml/objects/csiaddonsnode-provisioner-rbd.yaml" | \
+            kubectl --context=$context apply -f -; then
+            echo "  ✓ CSIAddonsNode created for RBD provisioner pod ${prov_pod}"
+        else
+            echo "  ✗ Failed to create CSIAddonsNode for ${prov_pod} on $context"
+            exit 1
+        fi
     else
         echo "  ⚠ No RBD provisioner pod found — skipping CSIAddonsNode creation for $context"
     fi

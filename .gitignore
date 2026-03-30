@@ -68,3 +68,4 @@ ginkgo.report
 velero*
 test/Logs/*
 Temp/*
+docs/testing/_archived_vrg_docs/*

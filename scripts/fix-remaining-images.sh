@@ -21,16 +21,39 @@ detect_container_runtime
 echo -e "${GREEN}=== Fixing Remaining Image Issues ===${NC}"
 echo -e "${YELLOW}Using $CONTAINER_RUNTIME as container runtime${NC}"
 
-# List of remaining images that need manual loading
-# (these are not handled by drenv cache due to custom repositories)
-MISSING_IMAGES=(
-    "quay.io/csiaddons/k8s-sidecar:v0.11.0"
-    "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0"
-    "registry.k8s.io/sig-storage/csi-provisioner:v5.2.0"
-    "registry.k8s.io/sig-storage/csi-attacher:v4.8.1"
-    "registry.k8s.io/sig-storage/csi-resizer:v1.13.2"
-    "registry.k8s.io/sig-storage/csi-snapshotter:v8.2.1"
-)
+# Get the directory of this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Function to read required images from config file
+read_required_images() {
+    local config_file="$ROOT_DIR/config/required-images.txt"
+    
+    if [[ ! -f "$config_file" ]]; then
+        echo "Error: Required images file not found: $config_file" >&2
+        exit 1
+    fi
+    
+    # Read all images (excluding comments and empty lines)
+    mapfile -t ALL_REQUIRED_IMAGES < <(grep -v '^[[:space:]]*#' "$config_file" | grep -v '^[[:space:]]*$')
+    
+    if [[ ${#ALL_REQUIRED_IMAGES[@]} -eq 0 ]]; then
+        echo "Error: No images found in $config_file" >&2
+        exit 1
+    fi
+}
+
+# Read the centralized image list
+read_required_images
+
+# For remaining image fixes, we focus on CSI-related images
+# Filter images that typically need manual loading
+MISSING_IMAGES=()
+for image in "${ALL_REQUIRED_IMAGES[@]}"; do
+    if [[ "$image" == *"csiaddons"* ]] || [[ "$image" == *"csi-"* ]]; then
+        MISSING_IMAGES+=("$image")
+    fi
+done
 
 # Function to load images to both clusters
 load_images() {
@@ -39,8 +62,8 @@ load_images() {
     
     # Pull all images in parallel (batches of 3)
     for ((i=0; i<${#images[@]}; i+=3)); do
-        batch=(${images[@]:i:3})
-        echo -e "${YELLOW}Pulling batch: ${batch[@]}${NC}"
+        batch=("${images[@]:i:3}")
+        echo -e "${YELLOW}Pulling batch: ${batch[*]}${NC}"
         
         for image in "${batch[@]}"; do
             $CONTAINER_RUNTIME pull "$image" &

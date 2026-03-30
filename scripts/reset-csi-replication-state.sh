@@ -13,6 +13,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Source the centralized cleanup function
+source "$SCRIPT_DIR/cleanup-pvc-vr.sh"
+
 echo "=== Reset CSI Replication State (fast) ==="
 echo "Assumes dr1/dr2 clusters are running. Run 'make start-csi-replication' first if stopped."
 echo ""
@@ -29,49 +32,11 @@ fi
 echo "✓ Clusters reachable"
 echo ""
 
-# 1. Clean test resources (VRs, VGRs, PVCs) - no confirmation when called from make
-echo "1. Cleaning test resources (VRs, VGRs, PVCs)..."
-./scripts/cleanup-pvc-vr.sh -y dr1 dr2 2>/dev/null || true
-
-# Clean VGRs and VGRContents (cleanup-pvc-vr may not cover these)
+# 1. Clean test resources (VRs, VGRs, PVCs) using centralized cleanup function
+echo "1. Cleaning test resources (VRs, VGRs, VGRCs, VGs, VGCs, PVCs)..."
 for ctx in dr1 dr2; do
-    for vgr in $(kubectl --context=$ctx get volumegroupreplication -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null); do
-        [ -z "$vgr" ] && continue
-        ns="${vgr%%/*}"
-        name="${vgr##*/}"
-        kubectl --context=$ctx patch volumegroupreplication "$name" -n "$ns" --type='merge' -p='{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-        kubectl --context=$ctx delete volumegroupreplication "$name" -n "$ns" --ignore-not-found=true --wait=false 2>/dev/null || true
-    done
-    # VolumeGroupReplicationContents are cluster-scoped; patch finalizers then delete
-    for vgrc_name in $(kubectl --context=$ctx get volumegroupreplicationcontent -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
-        [ -z "$vgrc_name" ] && continue
-        echo "  Patching and deleting VolumeGroupReplicationContent $vgrc_name on $ctx..."
-        kubectl --context=$ctx patch volumegroupreplicationcontent "$vgrc_name" --type='merge' -p='{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-        kubectl --context=$ctx delete volumegroupreplicationcontent "$vgrc_name" --ignore-not-found=true --wait=false 2>/dev/null || true
-    done
+    cleanup_csi_resources "$ctx" --quiet
 done
-# Wait for VGRCs to be fully removed (they can stick in Terminating if finalizers block)
-echo "  Waiting for VolumeGroupReplicationContents to be removed..."
-count_dr1=1
-count_dr2=1
-for _ in $(seq 1 30); do
-    count_dr1=$(kubectl --context=dr1 get volumegroupreplicationcontent -o name 2>/dev/null | wc -l)
-    count_dr2=$(kubectl --context=dr2 get volumegroupreplicationcontent -o name 2>/dev/null | wc -l)
-    if [ "${count_dr1:-0}" -eq 0 ] && [ "${count_dr2:-0}" -eq 0 ]; then
-        break
-    fi
-    sleep 1
-done
-if [ "${count_dr1:-0}" -gt 0 ] || [ "${count_dr2:-0}" -gt 0 ]; then
-    echo "  Some VGRCs still present; forcing removal..."
-    for ctx in dr1 dr2; do
-        for vgrc_name in $(kubectl --context=$ctx get volumegroupreplicationcontent -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
-            [ -z "$vgrc_name" ] && continue
-            kubectl --context=$ctx patch volumegroupreplicationcontent "$vgrc_name" --type='merge' -p='{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-            kubectl --context=$ctx delete volumegroupreplicationcontent "$vgrc_name" --ignore-not-found=true --force --grace-period=0 2>/dev/null || true
-        done
-    done
-fi
 echo "✓ Test resources cleaned"
 echo ""
 

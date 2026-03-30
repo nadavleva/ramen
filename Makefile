@@ -160,6 +160,10 @@ preload-images: ## Pre-load container images into CSI replication clusters (dr1 
 setup-csi-replication: drenv-prereqs venv ## Setup DR clusters with Ceph SDS Storage for CSI Replication testing using rook environment. Uses podman by default; set CONTAINER_RUNTIME=docker to use docker.
 	./scripts/setup-csi-replication.sh
 
+.PHONY: test-registry-mirror
+test-registry-mirror: ## Test if the local registry mirror is working properly with minikube clusters.
+	./scripts/test-registry-mirror.sh
+
 .PHONY: stop-csi-replication  
 stop-csi-replication: venv ## Stop CSI Replication clusters (keep VMs).
 	@echo "Cleaning up old replicated images from both clusters..."
