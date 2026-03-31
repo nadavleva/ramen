@@ -3,14 +3,148 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Check cluster CSI capabilities: NetworkFence, CSI replication addon, VolumeGroupReplication.
-# Usage: ./check_cluster_csi_capabilities.sh [--mode networkfence|replication|volumegroupreplication|all] [--detailed]
-#   --mode: which capabilities to check (default: networkfence)
-#   --detailed: for volumegroupreplication (or all), print CSIAddonsNode rows, sidecar images, controller deployment
-#   CHECK_MODE env var overrides --mode if set
+#
+# DESCRIPTION:
+#   This script analyzes a Kubernetes cluster to detect and validate CSI (Container Storage Interface)
+#   capabilities required for disaster recovery operations. It checks for NetworkFence capabilities,
+#   CSI Replication Addon support, and VolumeGroupReplication functionality.
+#
+# PREREQUISITES:
+#   - kubectl: Kubernetes command-line tool must be installed and configured
+#   - kubeconfig: Valid Kubernetes configuration with cluster access
+#   - Cluster access: Read permissions for CRDs, pods, deployments, and CSIAddonsNode objects
+#   - jq: JSON processor for parsing kubectl output
+#   - Standard Unix tools: awk, sort, sed
+#
+# CLUSTER REQUIREMENTS:
+#   - Kubernetes cluster with CSI drivers deployed
+#   - For NetworkFence: NetworkFence/NetworkFenceClass CRDs, CSIAddonsNode CRD
+#   - For Replication: kubernetes-csi-addons controller, VolumeReplication CRDs
+#   - For VolumeGroupReplication: VGR CRDs, csi-addons sidecar containers
+#
+# USAGE:
+#   ./check_cluster_csi_capabilities.sh [OPTIONS]
+#
+# OPTIONS:
+#   --mode MODE     Specify which capabilities to check:
+#                   networkfence           - Check NetworkFence capabilities (default)
+#                   replication           - Check CSI Replication Addon
+#                   volumegroupreplication - Check VolumeGroupReplication
+#                   all                   - Check all capabilities
+#   --detailed      Show detailed information (CSIAddonsNode details, container images, etc.)
+#   --help, -h      Display this help message
+#
+# ENVIRONMENT VARIABLES:
+#   CHECK_MODE      Override --mode option (networkfence|replication|volumegroupreplication|all)
+#   POD_HINT        Filter pods by regex pattern to reduce output (optional)
+#
+# EXAMPLES:
+#   # Check NetworkFence capabilities (default)
+#   ./check_cluster_csi_capabilities.sh
+#
+#   # Check all capabilities with detailed output
+#   ./check_cluster_csi_capabilities.sh --mode all --detailed
+#
+#   # Check only VolumeGroupReplication
+#   ./check_cluster_csi_capabilities.sh --mode volumegroupreplication
+#
+#   # Use environment variable to set mode
+#   CHECK_MODE=replication ./check_cluster_csi_capabilities.sh
+#
+# EXIT CODES:
+#   0 - All checks passed successfully
+#   1 - One or more capability checks failed
+#   2 - Invalid arguments or missing prerequisites
 
 set -euo pipefail
 
 DETAILED=false
+
+show_help() {
+  cat << 'EOF'
+check_cluster_csi_capabilities.sh - CSI Capability Detection Tool
+
+DESCRIPTION:
+  Analyzes a Kubernetes cluster to detect and validate CSI capabilities required
+  for disaster recovery operations including NetworkFence, CSI Replication, and
+  VolumeGroupReplication functionality.
+
+PREREQUISITES:
+  Before running this script, ensure you have:
+
+  1. kubectl installed and in PATH
+     - Install: https://kubernetes.io/docs/tasks/tools/
+
+  2. Valid kubeconfig with cluster access
+     - Set context: kubectl config use-context <context-name>
+     - Verify access: kubectl get nodes
+
+  3. Required cluster permissions:
+     - Read access to: CRDs, pods, deployments, CSIAddonsNode objects
+     - Namespace access: all namespaces (or specific CSI/storage namespaces)
+
+  4. Additional tools (usually pre-installed):
+     - jq (JSON processor)
+     - awk, sort, sed (standard Unix tools)
+
+CLUSTER SETUP:
+  The script detects capabilities in clusters with:
+
+  - CSI drivers deployed (e.g., Rook/Ceph, other storage providers)
+  - kubernetes-csi-addons controller (for replication features)
+  - CSI-addons sidecar containers (for advanced capabilities)
+  - Relevant CRDs installed (NetworkFence, VolumeReplication, etc.)
+
+USAGE:
+  check_cluster_csi_capabilities.sh [OPTIONS]
+
+OPTIONS:
+  --mode MODE        Capabilities to check:
+                     networkfence (default) - NetworkFence support
+                     replication           - CSI Replication Addon
+                     volumegroupreplication - VolumeGroupReplication
+                     all                   - All capabilities
+
+  --detailed         Show additional details:
+                     - Full CSIAddonsNode capability strings
+                     - Container image information
+                     - Controller deployment status
+
+  --help, -h         Show this help message
+
+ENVIRONMENT:
+  CHECK_MODE         Override --mode (networkfence|replication|volumegroupreplication|all)
+  POD_HINT          Filter pods by regex pattern (reduces output)
+
+EXAMPLES:
+  # Basic NetworkFence check
+  ./check_cluster_csi_capabilities.sh
+
+  # Comprehensive check with details
+  ./check_cluster_csi_capabilities.sh --mode all --detailed
+
+  # Check specific capability
+  ./check_cluster_csi_capabilities.sh --mode volumegroupreplication
+
+  # Filter pods during check
+  POD_HINT="rook" ./check_cluster_csi_capabilities.sh --mode all
+
+TROUBLESHOOTING:
+  - "kubectl has no current context": Run 'kubectl config use-context <context>'
+  - "kubectl cannot reach API server": Check network connectivity and credentials
+  - "missing required command": Install missing tools (kubectl, jq)
+  - Empty results: Verify CSI drivers and addons are deployed in cluster
+
+EXIT CODES:
+  0  Success - All requested capabilities detected and configured
+  1  Failure - Missing capabilities, CRDs, or configuration issues
+  2  Error   - Invalid arguments, missing tools, or cluster connectivity
+
+For more information, visit:
+  https://github.com/RamenDR/ramen/tree/main/docs
+
+EOF
+}
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing required command: $1" >&2; exit 1; }; }
 need_cmd kubectl
@@ -41,9 +175,14 @@ while [[ $# -gt 0 ]]; do
       DETAILED=true
       shift
       ;;
+    --help|-h)
+      show_help
+      exit 0
+      ;;
     *)
-      echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--mode networkfence|replication|volumegroupreplication|all] [--detailed]" >&2
+      echo "ERROR: Unknown option: $1" >&2
+      echo "Usage: $0 [--mode networkfence|replication|volumegroupreplication|all] [--detailed] [--help]" >&2
+      echo "Run '$0 --help' for detailed usage information." >&2
       exit 2
       ;;
   esac
@@ -257,18 +396,45 @@ print_vgr_configuration_verdict() {
 check_kubectl_connectivity() {
   echo
   echo "## 0) kubectl connectivity"
+  
+  # Check if kubeconfig exists
+  if [[ ! -f "${KUBECONFIG:-$HOME/.kube/config}" ]]; then
+    echo "ERROR: kubeconfig file not found."
+    echo "Expected location: ${KUBECONFIG:-$HOME/.kube/config}"
+    echo "Fix: Ensure kubectl is configured with 'kubectl config use-context <context>'"
+    exit 2
+  fi
+  
+  # Check current context
   ctx="$(kubectl config current-context 2>/dev/null || true)"
   if [[ -z "${ctx}" ]]; then
     echo "ERROR: kubectl has no current context."
+    echo "Available contexts:"
+    kubectl config get-contexts --no-headers 2>/dev/null | awk '{print "  - " $2}' || echo "  (none found)"
     echo "Fix: kubectl config use-context <context>"
     exit 2
   fi
   echo "Context: ${ctx}"
-  kubectl version --request-timeout=5s >/dev/null 2>&1 || {
+  
+  # Check API server connectivity
+  echo "Testing API server connectivity..."
+  if ! kubectl version --request-timeout=10s >/dev/null 2>&1; then
     echo "ERROR: kubectl cannot reach the API server for context '${ctx}'."
+    echo "Possible causes:"
+    echo "  - Network connectivity issues"
+    echo "  - Invalid or expired credentials"
+    echo "  - Cluster is down or unreachable"
+    echo "  - Firewall blocking access"
+    echo "Debug: Try 'kubectl cluster-info' for more details"
     exit 2
-  }
+  fi
   echo "OK: API reachable."
+  
+  # Check basic permissions
+  if ! kubectl auth can-i get crd >/dev/null 2>&1; then
+    echo "WARNING: Limited permissions detected. Some checks may fail."
+    echo "Required permissions: get access to CRDs, pods, deployments"
+  fi
 }
 
 check_networkfence() {
