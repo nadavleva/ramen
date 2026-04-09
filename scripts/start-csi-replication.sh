@@ -11,6 +11,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Track total execution time
+START_TIME=$(date +%s)
+
 echo "Starting CSI replication clusters..."
 
 # Check if clusters exist (running or stopped) by looking for minikube profiles
@@ -42,4 +45,10 @@ echo "Applying CSI Addons fixes (versions + TLS) for VolumeReplication connectiv
 ./scripts/fix-csi-addons-versions.sh
 ./scripts/fix-csi-addons-tls.sh
 
-echo "✅ CSI replication clusters started and configured successfully"
+# Calculate total elapsed time
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
+MINUTES=$((ELAPSED / 60))
+SECONDS=$((ELAPSED % 60))
+
+echo "✅ CSI replication clusters started and configured successfully in ${MINUTES}m ${SECONDS}s"

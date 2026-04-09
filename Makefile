@@ -168,6 +168,8 @@ test-registry-mirror: ## Test if the local registry mirror is working properly w
 stop-csi-replication: venv ## Stop CSI Replication clusters (keep VMs).
 	@echo "Cleaning up old replicated images from both clusters..."
 	-./scripts/cleanup-replicated-images.sh
+	@echo "Cleaning up Ceph replication state (pools and peer configs)..."
+	-./scripts/cleanup-ceph-replication-state.sh
 	cd test && source ../venv && drenv stop envs/rook.yaml
 	@echo "✅ CSI replication clusters stopped successfully"
 
@@ -244,6 +246,8 @@ fix-rbd-mirror-health: ## Fix RBD mirror daemon health WARNING (e.g. after faile
 delete-csi-replication: venv ## Delete CSI Replication clusters completely.
 	@echo "Cleaning up old replicated images from both clusters..."
 	-./scripts/cleanup-replicated-images.sh
+	@echo "Cleaning up Ceph replication state (pools and peer configs)..."
+	-./scripts/cleanup-ceph-replication-state.sh
 	@echo "Deleting CSI Replication environment..."
 	cd test && source ../venv && drenv delete envs/rook.yaml
 	@echo "✅ CSI Replication environment deleted successfully"
