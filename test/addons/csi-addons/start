@@ -5,25 +5,149 @@
 
 import os
 import sys
+import time
+import subprocess
 
 from drenv import kubectl
 from drenv import cache
 
 
 def deploy(cluster):
-    print("Deploying csi addon for volume replication")
+    print("Deploying csi addon for volume replication (offline mode)")
+    print("ImagePullPolicy: Never - no network image pulls allowed")
+    
+    # Deploy with kustomization
+    # Note: ImagePullPolicy: Never is enforced via strategic merge patch
     kubectl.apply("-k", ".", context=cluster)
+    
+    # Verify imagePullPolicy was applied correctly
+    time.sleep(1)  # Brief delay to allow deployment to process
+    
+    print("\nVerifying ImagePullPolicy enforcement...")
+    try:
+        result = subprocess.run([
+            "kubectl", "--context", cluster, "-n", "csi-addons-system",
+            "get", "deployment/csi-addons-controller-manager", 
+            "-o", "jsonpath={.spec.template.spec.containers[0].imagePullPolicy}"
+        ], capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0:
+            policy = result.stdout.strip()
+            if policy == "Never":
+                print(f"✓ ImagePullPolicy correctly set to: {policy}")
+            else:
+                print(f"⚠ WARNING: ImagePullPolicy is {policy}, expected Never")
+                print("  Retrying deployment to apply patch...")
+                time.sleep(2)
+                kubectl.apply("-k", ".", context=cluster)
+        else:
+            print(f"⚠ Could not verify ImagePullPolicy: {result.stderr}")
+    except Exception as e:
+        print(f"Warning: Could not verify ImagePullPolicy: {e}")
 
 
-def wait(cluster):
+def diagnose_deployment(cluster):
+    """Print diagnostic information when deployment is slow"""
+    print("\n=== CSI Addons Deployment Diagnostics ===")
+    try:
+        # Check pod status
+        print("\nPod Status:")
+        subprocess.run(
+            ["kubectl", "--context", cluster, "-n", "csi-addons-system", "get", "pods", "-o", "wide"],
+            check=False
+        )
+        
+        # Check for ImagePullBackOff errors (network access attempt)
+        print("\nChecking for image pull errors:")
+        result = subprocess.run(
+            ["kubectl", "--context", cluster, "-n", "csi-addons-system", "get", "pods", "-o", "jsonpath={..containerStatuses[*].state}"],
+            check=False,
+            capture_output=True,
+            text=True
+        )
+        if "ImagePull" in result.stdout:
+            print("❌ CRITICAL: Pods attempting to pull images (network access required)")
+            print("   This indicates images are not pre-loaded in the cluster")
+            print("   All images must be pre-loaded for offline operation")
+        else:
+            print("✓ No ImagePullBackOff errors detected")
+        
+        # Check recent events
+        print("\nRecent Events in csi-addons-system:")
+        subprocess.run(
+            ["kubectl", "--context", cluster, "-n", "csi-addons-system", "get", "events", "--sort-by='.lastTimestamp'"],
+            check=False
+        )
+        
+        # Check deployment status
+        print("\nDeployment Status:")
+        subprocess.run(
+            ["kubectl", "--context", cluster, "-n", "csi-addons-system", "describe", "deployment/csi-addons-controller-manager"],
+            check=False
+        )
+        
+        # Check ImagePullPolicy setting
+        print("\nImagePullPolicy Setting:")
+        result = subprocess.run([
+            "kubectl", "--context", cluster, "-n", "csi-addons-system",
+            "get", "deployment/csi-addons-controller-manager", 
+            "-o", "jsonpath={.spec.template.spec.containers[0].imagePullPolicy}"
+        ], capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0:
+            policy = result.stdout.strip()
+            print(f"   imagePullPolicy: {policy if policy else '(not set - using default IfNotPresent)'}")
+            if policy != "Never":
+                print("   ⚠ WARNING: ImagePullPolicy is not set to Never!")
+        
+    except Exception as e:
+        print(f"Error during diagnostics: {e}")
+    print("===================================\n")
+
+
+def wait(cluster, max_retries=3):
     print("Waiting until csi-addons-controller-manager is rolled out")
-    kubectl.rollout(
-        "status",
-        "deploy/csi-addons-controller-manager",
-        "--namespace=csi-addons-system",
-        "--timeout=300s",
-        context=cluster,
-    )
+    print("(Offline mode - all images must be pre-loaded)")
+    
+    for attempt in range(max_retries):
+        try:
+            kubectl.rollout(
+                "status",
+                "deploy/csi-addons-controller-manager",
+                "--namespace=csi-addons-system",
+                "--timeout=600s",
+                context=cluster,
+            )
+            print("✓ CSI Addons deployment ready")
+            return
+        except Exception as e:
+            print(f"Deployment failed (attempt {attempt + 1}/{max_retries}): {e}")
+            
+            if attempt < max_retries - 1:
+                diagnose_deployment(cluster)
+                
+                # Kill pending pods so they restart
+                print("Killing pending pods to force restart...")
+                try:
+                    subprocess.run([
+                        "kubectl", "--context", cluster, "-n", "csi-addons-system",
+                        "delete", "pods", "-l", "app.kubernetes.io/name=csi-addons", "--grace-period=0"
+                    ], check=False, timeout=30, capture_output=True)
+                    time.sleep(5)
+                except Exception:
+                    pass
+                
+                print("Retrying in 30 seconds...")
+                time.sleep(30)
+            else:
+                print(f"\n✗ CSI Addons deployment failed after {max_retries} attempts")
+                diagnose_deployment(cluster)
+                print("\n❌ DEPLOYMENT FAILED")
+                print("Common causes:")
+                print("1. Images not pre-loaded: Run 'make preload-images'")
+                print("2. Cluster network issues: Check cluster status")
+                print("3. Pod trying to pull image: Check 'kubectl describe pod' for events")
+                raise
 
 
 if len(sys.argv) != 2:

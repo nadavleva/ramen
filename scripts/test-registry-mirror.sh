@@ -30,16 +30,77 @@ if curl -sf "http://localhost:5000/v2/_catalog" >/dev/null 2>&1; then
     CATALOG=$(curl -s "http://localhost:5000/v2/_catalog" 2>/dev/null)
     REPO_COUNT=$(echo "$CATALOG" | jq -r '.repositories | length' 2>/dev/null || echo "0")
     echo "   Registry contains $REPO_COUNT repositories"
+    
+    if [ "$REPO_COUNT" -gt 0 ]; then
+        echo "   Repositories and tags:"
+        echo "$CATALOG" | jq -r '.repositories[]' 2>/dev/null | while read -r repo; do
+            if [ -n "$repo" ]; then
+                echo "     📦 $repo"
+                # Get tags for this repository
+                TAGS=$(curl -s "http://localhost:5000/v2/$repo/tags/list" 2>/dev/null)
+                if [ $? -eq 0 ] && [ -n "$TAGS" ]; then
+                    echo "$TAGS" | jq -r '.tags[]?' 2>/dev/null | while read -r tag; do
+                        if [ -n "$tag" ]; then
+                            echo "        🏷️  $repo:$tag"
+                        fi
+                    done
+                else
+                    echo "        🏷️  (no tags or tags unavailable)"
+                fi
+            fi
+        done
+    else
+        echo "   No repositories found in registry"
+    fi
+    
+    # Check specifically for iptables-manager image
+    echo ""
+    echo "   Checking for iptables-manager image:"
+    if echo "$CATALOG" | jq -r '.repositories[]' 2>/dev/null | grep -q "csi-addons/iptables-manager"; then
+        log_success "✓ csi-addons/iptables-manager repository found in registry"
+    else
+        log_warning "⚠ csi-addons/iptables-manager repository NOT found in registry"
+        echo "     This image should be available as localhost/csi-addons/iptables-manager:latest"
+        echo "     You may need to push it to the registry first"
+    fi
 else
     log_error "Local registry is NOT accessible at http://localhost:5000"
     exit 1
 fi
 
+echo ""
+echo "2. Listing current images in each cluster..."
+
+for context in dr1 dr2; do
+    echo "Images in $context cluster:"
+    if minikube profile list --output=json 2>/dev/null | grep -q "\"Name\":\"$context\""; then
+        CLUSTER_IMAGES=$(minikube image ls -p "$context" 2>/dev/null || echo "Failed to get images")
+        if [ "$CLUSTER_IMAGES" = "Failed to get images" ]; then
+            log_warning "  ⚠ Could not retrieve image list from $context"
+        else
+            IMAGE_COUNT=$(echo "$CLUSTER_IMAGES" | wc -l)
+            echo "  📊 Total images in $context: $IMAGE_COUNT"
+            echo "  🔍 CSI-related images:"
+            echo "$CLUSTER_IMAGES" | grep -E "(csi|iptables|rook|ceph)" | sed 's/^/    /' || echo "    (no CSI-related images found)"
+            
+            # Check specifically for iptables-manager
+            if echo "$CLUSTER_IMAGES" | grep -q "iptables-manager"; then
+                log_success "  ✓ iptables-manager image found in $context"
+            else
+                log_warning "  ⚠ iptables-manager image NOT found in $context"
+            fi
+        fi
+    else
+        log_warning "  ⚠ $context cluster not found or not running"
+    fi
+    echo ""
+done
+
 # Test a simple image pull from registry in both clusters using 'docker load' method
 TEST_IMAGE="alpine:3.19"
+IPTABLES_IMAGE="localhost/csi-addons/iptables-manager:latest"
 
-echo ""
-echo "2. Testing image availability in registry..."
+echo "3. Testing image availability and loading..."
 
 for context in dr1 dr2; do
     echo "Testing $context cluster..."
@@ -93,6 +154,40 @@ EOF
         # Cleanup
         kubectl --context=$context delete pod registry-test >/dev/null 2>&1 || true
     fi
+    
+    echo "Testing iptables-manager image loading for $context..."
+    
+    # Try to load the iptables-manager image if it exists locally
+    if podman image inspect "$IPTABLES_IMAGE" >/dev/null 2>&1 || docker image inspect "$IPTABLES_IMAGE" >/dev/null 2>&1; then
+        log_info "iptables-manager image found locally, attempting to load into $context..."
+        
+        # Try with podman first, then docker
+        if command -v podman >/dev/null 2>&1; then
+            if podman save "$IPTABLES_IMAGE" | minikube image load --profile="$context" - 2>/dev/null; then
+                log_success "✓ Successfully loaded iptables-manager image into $context via podman"
+            else
+                log_warning "⚠ Failed to load iptables-manager via podman into $context"
+            fi
+        elif command -v docker >/dev/null 2>&1; then
+            if minikube image load "$IPTABLES_IMAGE" --profile="$context" 2>/dev/null; then
+                log_success "✓ Successfully loaded iptables-manager image into $context via docker"
+            else
+                log_warning "⚠ Failed to load iptables-manager via docker into $context"
+            fi
+        fi
+        
+        # Verify the image is now in the cluster
+        if minikube image ls -p "$context" 2>/dev/null | grep -q "iptables-manager"; then
+            log_success "✓ iptables-manager image confirmed in $context cluster"
+        else
+            log_warning "⚠ iptables-manager image not found in $context cluster after loading attempt"
+        fi
+    else
+        log_warning "iptables-manager image not found locally with podman or docker"
+        echo "   Try: podman build -t localhost/csi-addons/iptables-manager:latest <path-to-dockerfile>"
+    fi
+    
+    echo ""
 done
 
 echo ""

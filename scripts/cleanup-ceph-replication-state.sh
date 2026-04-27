@@ -11,11 +11,65 @@
 #
 # Usage:
 #   ./cleanup-ceph-replication-state.sh
+#
+# Environment:
+#   DELETE_WAIT              kubectl delete --wait (default: false - do not block on finalizers)
+#   POOL_DELETE_WAIT_SECONDS after deletes, poll this long for pools to vanish (default: 180)
+#
+# If CephBlockPools stay Terminating (mirroring / Rook finalizer), use:
+#   ./scripts/unstick-terminating-cephblockpools.sh
 
 set -e
 
 POOL_NAME="replicapool"
 NAMESPACE="rook-ceph"
+# Foreground kubectl delete (with default --wait) blocks until finalizers complete; a stuck CephBlockPool
+# can block forever. We use async deletion and a bounded poll so make stop-csi-replication keeps progressing.
+DELETE_WAIT="${DELETE_WAIT:-false}"
+POOL_DELETE_WAIT_SECONDS="${POOL_DELETE_WAIT_SECONDS:-180}"
+
+# Return names of CephBlockPools excluding builtin-mgr (space-separated).
+list_user_cephblockpools() {
+    local cluster=$1
+    local names
+    names=$(timeout 60 kubectl --context="$cluster" get cephblockpool -n "$NAMESPACE" \
+        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+    local out=""
+    for p in $names; do
+        [[ "$p" == "builtin-mgr" ]] && continue
+        out+="$p "
+    done
+    echo "${out%% }"
+}
+
+wait_for_user_cephblockpools_gone() {
+    local cluster=$1
+    local max_seconds=$2
+    local waited=0
+    local pending
+    pending="$(list_user_cephblockpools "$cluster")"
+    if [[ -z "${pending// }" ]] || (( max_seconds <= 0 )); then
+        if (( max_seconds <= 0 )) && [[ -n "${pending// }" ]]; then
+            printf '  Note: skipping wait (POOL_DELETE_WAIT_SECONDS=%s); pools may still be Terminating: %s\n' "$max_seconds" "$pending"
+        fi
+        return 0
+    fi
+    while (( waited < max_seconds )); do
+        pending="$(list_user_cephblockpools "$cluster")"
+        if [[ -z "${pending// }" ]]; then
+            return 0
+        fi
+        sleep 5
+        waited=$((waited + 5))
+        if (( waited % 30 == 0 )); then
+            printf '  ... still waiting for CephBlockPool removal (%ss): %s\n' "$waited" "$pending"
+        fi
+    done
+    printf '  Warning: after %ss these CephBlockPool resources still exist: %s\n' "$max_seconds" "$pending"
+    printf '    Inspect: kubectl --context=%s get cephblockpool -n %s -o yaml\n' "$cluster" "$NAMESPACE"
+    printf '    Operator: kubectl --context=%s -n %s logs deploy/rook-ceph-operator --tail=80\n' "$cluster" "$NAMESPACE"
+    return 0
+}
 
 cleanup_pool_and_peers() {
     local cluster=$1
@@ -34,26 +88,34 @@ cleanup_pool_and_peers() {
         echo "  No CephBlockPool resources found on $cluster"
         return 0
     fi
-    
+
+    local issued_pool_delete=0
     for pool in $pools; do
         # Skip the builtin-mgr pool (it's for internal cluster management)
         if [[ "$pool" == "builtin-mgr" ]]; then
             continue
         fi
-        
-        echo "  Deleting CephBlockPool: $pool"
-        kubectl --context=$cluster delete cephblockpool/$pool -n $NAMESPACE --ignore-not-found=true 2>/dev/null || true
-        
-        # Small delay to allow cascade deletion
+
+        issued_pool_delete=1
+        echo "  Deleting CephBlockPool: $pool (async: --wait=${DELETE_WAIT})"
+        kubectl --context=$cluster delete cephblockpool/$pool -n $NAMESPACE \
+            --ignore-not-found=true --wait="${DELETE_WAIT}" 2>/dev/null || true
+
         sleep 1
     done
+
+    if [[ "$issued_pool_delete" -eq 1 ]]; then
+        echo "  Waiting up to ${POOL_DELETE_WAIT_SECONDS}s for user CephBlockPools to disappear..."
+        wait_for_user_cephblockpools_gone "$cluster" "$POOL_DELETE_WAIT_SECONDS"
+    fi
     
     # Clean up any orphaned CephBlockPoolRadosNamespace resources
     echo "  Cleaning up CephBlockPoolRadosNamespace resources..."
     local rados_ns=$(kubectl --context=$cluster get cephblockpoolradosnamespace -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
     for rns in $rados_ns; do
         echo "    Deleting CephBlockPoolRadosNamespace: $rns"
-        kubectl --context=$cluster delete cephblockpoolradosnamespace/$rns -n $NAMESPACE --ignore-not-found=true 2>/dev/null || true
+        kubectl --context=$cluster delete cephblockpoolradosnamespace/$rns -n $NAMESPACE \
+            --ignore-not-found=true --wait="${DELETE_WAIT}" 2>/dev/null || true
     done
     
     # The RBD mirror daemon may need to be restarted to clear stale peer connections

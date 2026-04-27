@@ -5,8 +5,16 @@
 #
 # Use official kubernetes-csi-addons for VolumeReplication (test-dr-flow, test-csi-replication).
 # The cg-support fork broke single VR flow. VGR CRDs come from hack/test via setup-csi-storage-resources.
+#
+# NOTE: Using local cached manifests instead of GitHub URLs for offline/disconnected environments.
+# Local manifests are cached from: https://github.com/csi-addons/kubernetes-csi-addons/main/deploy/controller/
+# To update: run 'python3 cache' script to refresh local manifests.
+# OFFLINE MODE: ImagePullPolicy set to Never using strategic merge patch for disconnected environments.
 ---
 resources:
-  - https://raw.githubusercontent.com/csi-addons/kubernetes-csi-addons/main/deploy/controller/crds.yaml
-  - https://raw.githubusercontent.com/csi-addons/kubernetes-csi-addons/main/deploy/controller/rbac.yaml
-  - https://raw.githubusercontent.com/csi-addons/kubernetes-csi-addons/main/deploy/controller/setup-controller.yaml
+  - crds.yaml
+  - rbac.yaml
+  - setup-controller.yaml
+
+patchesStrategicMerge:
+  - imagepullpolicy-patch.yaml

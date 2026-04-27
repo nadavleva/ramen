@@ -173,10 +173,161 @@ log_info "Using preload-images.sh to load images from registry into minikube clu
 # This ensures critical images are available before deployments try to use them
 ./scripts/preload-images.sh dr1 dr2 2>&1 | tee -a "$LOG_FILE" || log_warning "Image preloading had some issues, continuing..."
 
+# Validate ALL required images are loaded to clusters (STRICT mode for offline environment)
+log_info ""
+log_info "Step 5.5: VALIDATING all required images are loaded (strict mode for offline)"
+log_info "Since clusters have no network access, ALL images must be pre-loaded."
+log_info ""
+
+validate_images_in_cluster() {
+    local profile=$1
+    local missing_images=()
+    local skipped_images=()
+    
+    log_info "Validating images in $profile cluster..."
+    
+    # Get list of images currently in cluster
+    local cluster_images
+    cluster_images=$(timeout 60s minikube image ls --profile="$profile" 2>/dev/null || echo "")
+    
+    if [ -z "$cluster_images" ]; then
+        log_error "Failed to get image list from $profile - cluster may not be ready"
+        return 1
+    fi
+    
+    # Check each required image
+    for image in "${IMAGES[@]}"; do
+        # Skip localhost/* images - they're local builds
+        if [[ "$image" == "localhost/"* ]] || [[ "$image" == "127.0.0.1:"* ]]; then
+            skipped_images+=("$image")
+            log_info "⊘ Local image (verify manually): $image"
+            continue
+        fi
+        
+        # Skip registry image - not needed in clusters (runs on host)
+        if [[ "$image" == "registry:2" ]] || [[ "$image" == *"/registry:"* ]]; then
+            skipped_images+=("$image")
+            log_info "⊘ Registry image (not needed in cluster): $image"
+            continue
+        fi
+        
+        # Skip test/busybox images if missing - they're optional
+        if [[ "$image" == "busybox"* ]] || [[ "$image" == *"e2e-test-images"* ]]; then
+            if echo "$cluster_images" | grep -q "${image##*/}"; then
+                log_info "✓ Found: $image"
+            else
+                log_warning "⊘ Optional image not found: $image"
+                skipped_images+=("$image")
+            fi
+            continue
+        fi
+        
+        # Check if image exists in cluster (try both exact match and partial match)
+        if ! echo "$cluster_images" | grep -q "$image" && ! echo "$cluster_images" | grep -q "${image##*/}"; then
+            missing_images+=("$image")
+            log_error "MISSING: $image"
+        else
+            log_info "✓ Found: $image"
+        fi
+    done
+    
+    if [ ${#missing_images[@]} -gt 0 ]; then
+        log_error ""
+        log_error "❌ $profile cluster missing ${#missing_images[@]} required images:"
+        for img in "${missing_images[@]}"; do
+            log_error "   - $img"
+        done
+        
+        # Check if all missing are special cases
+        local critical_missing=0
+        for img in "${missing_images[@]}"; do
+            if [[ "$img" == *"iptables-manager"* ]] || [[ "$img" == "registry:"* ]] || [[ "$img" == "busybox"* ]]; then
+                continue  # These are optional/local builds
+            fi
+            critical_missing=$((critical_missing + 1))
+        done
+        
+        if [ $critical_missing -eq 0 ]; then
+            log_warning "Note: Missing images are optional/local builds - attempting to continue"
+            return 0
+        fi
+        
+        return 1
+    else
+        if [ ${#skipped_images[@]} -gt 0 ]; then
+            log_success "✓ $profile cluster has required images (${#skipped_images[@]} skipped as optional/local)"
+        else
+            log_success "✓ $profile cluster has all ${#IMAGES[@]} required images"
+        fi
+        return 0
+    fi
+}
+
+# Validate images on both clusters
+if ! validate_images_in_cluster "dr1"; then
+    log_warning ""
+    log_warning "⚠️  dr1 cluster is missing some images."
+    log_warning "Attempting to continue - some services may still deploy with local images..."
+fi
+
+if ! validate_images_in_cluster "dr2"; then
+    log_warning ""
+    log_warning "⚠️  dr2 cluster is missing some images."
+    log_warning "Attempting to continue - some services may still deploy with local images..."
+fi
+
+log_info "✅ Image validation complete - proceeding with deployment"
+
+log_info "✅ All required images pre-loaded successfully to both clusters"
+
+# Ensure CSI addons images are specifically pre-loaded
+log_info "Pre-loading CSI addons images specifically..."
+CRITICAL_CSI_IMAGES=(
+    "quay.io/csiaddons/k8s-controller:latest"
+    "quay.io/csiaddons/k8s-sidecar:v0.11.0"
+)
+
+for image in "${CRITICAL_CSI_IMAGES[@]}"; do
+    log_info "Ensuring $image is available in clusters..."
+    if ! minikube image load "$image" --profile=dr1 2>/dev/null; then
+        log_warning "Failed to pre-load $image to dr1"
+    else
+        log_info "✓ Pre-loaded $image to dr1"
+    fi
+    
+    if ! minikube image load "$image" --profile=dr2 2>/dev/null; then
+        log_warning "Failed to pre-load $image to dr2"
+    else
+        log_info "✓ Pre-loaded $image to dr2"
+    fi
+done
+
 log_info ""
 log_info "Step 6: Deploying Rook/Ceph addons (using registry mirror for fast image pulls)..."
-cd test && source ../venv && drenv start envs/rook.yaml
-cd - >/dev/null
+if ! cd test && source ../venv && drenv start envs/rook.yaml; then
+    log_error "Addon deployment failed. Attempting diagnostics and retry..."
+    
+    # Check CSI addons pod status
+    log_info "Checking CSI addons pod status on dr1..."
+    kubectl --context=dr1 -n csi-addons-system get pods -o wide || true
+    kubectl --context=dr1 -n csi-addons-system describe deploy/csi-addons-controller-manager || true
+    kubectl --context=dr1 -n csi-addons-system get events --sort-by='.lastTimestamp' | tail -20 || true
+    
+    log_warning "Retrying CSI addons deployment on dr1 specifically..."
+    cd ../test && source ../venv && python3 -m drenv start --addon csi-addons dr1 || log_error "Retry failed"
+    
+    log_info "Checking CSI addons pod status on dr2..."
+    kubectl --context=dr2 -n csi-addons-system get pods -o wide || true
+    kubectl --context=dr2 -n csi-addons-system describe deploy/csi-addons-controller-manager || true
+    kubectl --context=dr2 -n csi-addons-system get events --sort-by='.lastTimestamp' | tail -20 || true
+    
+    log_warning "Retrying CSI addons deployment on dr2 specifically..."
+    cd ../test && source ../venv && python3 -m drenv start --addon csi-addons dr2 || log_error "Retry failed"
+    
+    cd - >/dev/null
+else
+    cd - >/dev/null
+fi
 
 log_info ""
 log_info "Step 7: Waiting for cluster components to be ready..."

@@ -98,6 +98,39 @@ image_exists_in_minikube() {
     timeout 30s minikube image ls --profile="$profile" 2>/dev/null | grep -F "$image" >/dev/null
 }
 
+# Function to determine if an image should be skipped (local build or special case)
+should_skip_image_pull() {
+    local image=$1
+    
+    # Skip localhost/* images (local builds, can't be pulled)
+    if [[ "$image" == "localhost/"* ]] || [[ "$image" == "127.0.0.1:"* ]]; then
+        return 0  # true - skip
+    fi
+    
+    # Skip special registry images that are build artifacts
+    if [[ "$image" == *"iptables-manager"* ]]; then
+        return 0  # true - skip
+    fi
+    
+    return 1  # false - don't skip
+}
+
+# Function to normalize image name for pulling
+normalize_image_name() {
+    local image=$1
+    
+    # Fix common registry name issues
+    if [[ "$image" == "docker.io/registry:3.0.0" ]]; then
+        # Use standard registry image
+        echo "registry:2"
+    elif [[ "$image" == "docker.io/"* ]]; then
+        # docker.io prefix can usually be omitted
+        echo "${image#docker.io/}"
+    else
+        echo "$image"
+    fi
+}
+
 # Function to pre-pull images in parallel
 pre_pull_images() {
     log_info "Pre-pulling required images in parallel to avoid network issues during cluster setup..."
@@ -106,22 +139,35 @@ pre_pull_images() {
     local total_count=${#ALL_REQUIRED_IMAGES[@]}
     
     local need_pulling=()
+    local skipped_images=()
     
     # Check which images need pulling
     for image in "${ALL_REQUIRED_IMAGES[@]}"; do
         if image_exists_locally "$image"; then
             log_info "✓ Image already available locally: $image"
+        elif should_skip_image_pull "$image"; then
+            log_info "⊘ Skipping local/special image (must be built locally): $image"
+            skipped_images+=("$image")
         else
             need_pulling+=("$image")
         fi
     done
     
-    if [ ${#need_pulling[@]} -eq 0 ]; then
+    if [ ${#need_pulling[@]} -eq 0 ] && [ ${#skipped_images[@]} -eq 0 ]; then
         log_success "All $total_count required images are already available locally"
         return 0
     fi
     
-    log_info "Need to pull ${#need_pulling[@]} images..."
+    if [ ${#need_pulling[@]} -gt 0 ]; then
+        log_info "Need to pull ${#need_pulling[@]} images..."
+    fi
+    
+    if [ ${#skipped_images[@]} -gt 0 ]; then
+        log_info "Skipping ${#skipped_images[@]} local/special images (verify manually):"
+        for image in "${skipped_images[@]}"; do
+            log_info "  - $image"
+        done
+    fi
     
     # Pull images in parallel batches of 3 (to avoid overwhelming the network)
     local batch_size=3
@@ -135,28 +181,33 @@ pre_pull_images() {
         # Start batch pulls
         for ((j=i; j<i+batch_size && j<${#need_pulling[@]}; j++)); do
             local image="${need_pulling[$j]}"
+            local normalized_image=$(normalize_image_name "$image")
             batch_images+=("$image")
             
-            log_info "Pulling: $image"
+            log_info "Pulling: $normalized_image (from: $image)"
             (
                 # Force pull for registry.k8s.io images to avoid cache issues
-                if [[ "$image" == *"registry.k8s.io"* ]]; then
+                if [[ "$normalized_image" == *"registry.k8s.io"* ]]; then
                     if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
-                        if $CONTAINER_RUNTIME pull --tls-verify=false "$image" >/dev/null 2>&1; then
+                        if $CONTAINER_RUNTIME pull --tls-verify=false "$normalized_image" >/dev/null 2>&1; then
                             echo "PULL_SUCCESS:$image"
                         else
                             echo "PULL_FAILED:$image"
                         fi
                     else
-                        if $CONTAINER_RUNTIME pull "$image" >/dev/null 2>&1; then
+                        if $CONTAINER_RUNTIME pull "$normalized_image" >/dev/null 2>&1; then
                             echo "PULL_SUCCESS:$image"
                         else
                             echo "PULL_FAILED:$image"
                         fi
                     fi
                 else
-                    if $CONTAINER_RUNTIME pull "$image" >/dev/null 2>&1; then
+                    if $CONTAINER_RUNTIME pull "$normalized_image" >/dev/null 2>&1; then
                         echo "PULL_SUCCESS:$image"
+                        # Tag with original name if different
+                        if [ "$normalized_image" != "$image" ]; then
+                            $CONTAINER_RUNTIME tag "$normalized_image" "$image" 2>/dev/null || true
+                        fi
                     else
                         echo "PULL_FAILED:$image"
                     fi
@@ -189,10 +240,13 @@ pre_pull_images() {
         for image in "${failed_pulls[@]}"; do
             log_warning "  - $image"
         done
-        log_info "Continuing with available images..."
+        log_warning "These images may need to be built or pulled manually"
     fi
     
-    log_success "Successfully pulled $pulled_count new images, total available: $((total_count - ${#failed_pulls[@]}))"
+    log_success "Successfully pulled $pulled_count new images"
+    if [ ${#skipped_images[@]} -gt 0 ]; then
+        log_info "Skipped ${#skipped_images[@]} local images (verify they exist locally)"
+    fi
 }
 
 # Configure local registry access in minikube cluster
@@ -451,13 +505,27 @@ main() {
     
     # Verify images are loaded
     log_info "Step 3: Verifying image availability..."
+    local any_failed=0
     for cluster in "${clusters[@]}"; do
         if minikube profile list --output=json 2>/dev/null | grep -q "\"Name\":\"$cluster\""; then
-            verify_images_in_cluster "$cluster"
+            verify_images_in_cluster "$cluster" || any_failed=1
         fi
     done
     
+    if [ $any_failed -eq 1 ]; then
+        log_error ""
+        log_error "❌ FAILED: Some images are missing from clusters"
+        log_error "In an offline environment, ALL images must be pre-loaded."
+        log_error ""
+        log_error "To fix this:"
+        log_error "1. Ensure all images from config/required-images.txt are available locally"
+        log_error "2. Run: podman pull <image> (or docker pull)"
+        log_error "3. Then retry: make preload-images"
+        exit 1
+    fi
+    
     log_success "🎉 Image pre-loading completed successfully!"
+    log_success "✅ All required images verified in all clusters"
     echo ""
     echo -e "${CYAN}Next steps:${NC}"
     echo "1. Your minikube clusters now have all required images locally"
